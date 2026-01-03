@@ -80,33 +80,35 @@ def preprocess_arabic_text(text):
     return text
 
 # ============================================================================
-# MODEL LOADING
+# MODEL LOADING (CORRECTED PATHS & ENGLISH COMMENTS)
 # ============================================================================
 
 @st.cache_resource
 def load_models():
-    """Load all trained models and vectorizers"""
+    """Load all trained models and vectorizers with correct file paths."""
     try:
-        # Define base path (works for both local and cloud)
-        base_path = Path(__file__).parent / "models" if Path(__file__).parent.name == "Module1_Text_to_Emotion" else Path("Module1_Text_to_Emotion/models")
+        # Define the base path relative to the current file (app.py)
+        # This ensures the path works correctly on both local machine and Streamlit Cloud
+        base_path = Path(__file__).parent / "models"
         
-        # Fallback if paths are different in deployment structure
-        if not base_path.exists():
-            base_path = Path("models")
-
         models = {
-            'emotion_model': pickle.load(open(base_path / 'emotions_models/emotion_model_v1.pkl', 'rb')),
-            'emotion_vectorizer': pickle.load(open(base_path / 'emotions_models/emotion_tfidf_v1.pkl', 'rb')),
-            'emotion_encoder': pickle.load(open(base_path / 'emotions_models/emotion_encoder_v1.pkl', 'rb')),
-            'dialect_model': pickle.load(open(base_path / 'dialect_models/dialect_model_v1.pkl', 'rb')),
-            'dialect_vectorizer': pickle.load(open(base_path / 'dialect_models/dialect_tfidf_v1.pkl', 'rb')),
-            'dialect_encoder': pickle.load(open(base_path / 'dialect_models/dialect_encoder_v1.pkl', 'rb'))
+            # Emotion Models
+            # Note: The folder is named 'emotion_models' (singular 'emotion')
+            'emotion_model': pickle.load(open(base_path / 'emotion_models/emotion_detection_model.pkl', 'rb')),
+            'emotion_vectorizer': pickle.load(open(base_path / 'emotion_models/emotion_tfidf_vectorizer.pkl', 'rb')),
+            'emotion_encoder': pickle.load(open(base_path / 'emotion_models/emotion_label_encoder.pkl', 'rb')),
+            
+            # Dialect Models
+            'dialect_model': pickle.load(open(base_path / 'dialect_models/dialect_model.pkl', 'rb')),
+            'dialect_vectorizer': pickle.load(open(base_path / 'dialect_models/dialect_vectorizer.pkl', 'rb')),
+            'dialect_encoder': pickle.load(open(base_path / 'dialect_models/dialect_encoder.pkl', 'rb'))
         }
         return models, True
     except Exception as e:
-        st.error(f"Error loading models: {e}")
+        # Log the error details to help with debugging if a file is missing
+        st.error(f"Error loading models. Please verify files exist in: {base_path}")
+        st.error(f"Detailed Error: {e}")
         return None, False
-
 # ============================================================================
 # PREDICTION FUNCTIONS
 # ============================================================================
