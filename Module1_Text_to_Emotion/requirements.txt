@@ -1,47 +1,8 @@
-# ============================================================================
-# EMOTIONAL CHATBOT - MODULE 1
-# Python Dependencies
-# ============================================================================
-
-# Core Data Science & Machine Learning
-scikit-learn
+streamlit
+scikit-learn>=1.2.2
 pandas
 numpy
-
-# Natural Language Processing
 nltk
-arabic-stemmer
-
-# Visualization & Plotting
 matplotlib
 seaborn
-
-# Interactive Web Framework
-streamlit
-
-# Text Processing & Utilities
-regex
-
-# Performance & Optimization
 joblib
-
-# Additional Utilities
-python-dotenv
-tqdm
-requests
-
-# ============================================================================
-# INSTALLATION
-# ============================================================================
-#
-# pip install -r requirements.txt
-#
-# With Virtual Environment (Recommended):
-#   python -m venv venv
-#   source venv/bin/activate
-#   pip install -r requirements.txt
-#
-# Run the App:
-#   streamlit run app.py
-#
-# ============================================================================
