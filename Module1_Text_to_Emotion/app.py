@@ -66,7 +66,6 @@ MODEL_PATH_FULL = os.path.join(BASE_DIR, MODEL_FILENAME)
 LABEL_ENCODER_PATH = os.path.join(BASE_DIR, "label_encoder.pkl")
 
 # Google Drive File ID for the heavy model weights (~500MB)
-# Extracted from the provided Drive link
 DRIVE_FILE_ID = '12TtvlA3365gKRV0jCtKhCeN9oSk8fK1v'
 
 # ============================================================================
@@ -77,10 +76,10 @@ DRIVE_FILE_ID = '12TtvlA3365gKRV0jCtKhCeN9oSk8fK1v'
 def load_prediction_model():
     """
     Downloads model weights from Google Drive if missing, then loads 
-    the Tokenizer, Model, and Label Encoder into memory.
+    the Tokenizer, Model, and Label Encoder.
     
-    Includes a fix for 'Unrecognized model' error by explicitly setting
-    the architecture to 'bert'.
+    Includes a CRITICAL FIX for 'Unrecognized model' error by forcing 
+    architecture type to 'bert'.
     """
     # A) Verify existence of model weights; download from Cloud if missing
     if not os.path.exists(MODEL_PATH_FULL):
@@ -101,9 +100,11 @@ def load_prediction_model():
         tokenizer = AutoTokenizer.from_pretrained(BASE_DIR)
         
         # 2. Load Configuration and Force Architecture Type
-        # CRITICAL FIX: The config.json might be missing "model_type".
-        # We explicitly set it to "bert" because AraBERT is BERT-based.
+        # CRITICAL FIX: The config.json is missing the "model_type" key.
+        # We explicitly set it to "bert" to resolve the "Unrecognized model" error.
         config = AutoConfig.from_pretrained(BASE_DIR)
+        
+        # Force model type if undefined
         if not hasattr(config, 'model_type') or config.model_type is None:
             config.model_type = 'bert'
             
