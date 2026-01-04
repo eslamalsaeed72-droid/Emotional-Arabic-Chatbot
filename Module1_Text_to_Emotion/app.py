@@ -1,7 +1,7 @@
 import streamlit as st
 import os
-import json
 import torch
+import pickle
 from transformers import AutoConfig, AutoTokenizer, AutoModelForSequenceClassification
 
 # ============================================================
@@ -14,38 +14,45 @@ st.set_page_config(
 )
 
 # ============================================================
-# Paths for model_v2 (single Transformer model)
+# Paths for models_v2
 # ============================================================
-# NOTE:
-# Place app.py in the same directory that contains `model_v2/`
-# or update BASE_MODEL_DIR accordingly.
-BASE_MODEL_DIR = "model_v2"
+# Place this app.py inside: Module1_Text_to_Emotion/
+# That directory must contain the folder: models_v2/
+BASE_MODEL_DIR = "models_v2"
 
 CONFIG_PATH = os.path.join(BASE_MODEL_DIR, "config.json")
-TOKENIZER_PATH = BASE_MODEL_DIR          # tokenizer.json, vocab.txt, special_tokens_map.json, tokenizer_config.json
-LABEL_ENCODER_PATH = os.path.join(BASE_MODEL_DIR, "label_encoder.pkl")
-
-# If the actual PyTorch weights file name is different (e.g. pytorch_model.bin),
-# it will be loaded automatically via AutoModelForSequenceClassification.from_pretrained.
+TOKENIZER_PATH = BASE_MODEL_DIR
 MODEL_PATH = BASE_MODEL_DIR
+LABEL_ENCODER_PATH = os.path.join(BASE_MODEL_DIR, "label_encoder.pkl")
 
 
 # ============================================================
-# Utility: Load label mapping from pickle encoder
+# Helper: load label encoder mapping
 # ============================================================
 def load_label_mapping(pickle_path):
     """
-    Load label encoder saved with pickle and build an index-to-label mapping.
-    This assumes a scikit-learn LabelEncoder-like object with `classes_` attribute.
+    Load a scikit-learn style LabelEncoder from pickle and
+    build an index-to-label mapping for the Transformer config.
     """
-    import pickle
+    if not os.path.exists(pickle_path):
+        # Extra debug information if the file is not visible
+        cwd = os.getcwd()
+        available = os.listdir(os.path.dirname(pickle_path) or ".")
+        raise FileNotFoundError(
+            f"label_encoder.pkl not found at: {pickle_path}\n"
+            f"Current working directory: {cwd}\n"
+            f"Contents of `{os.path.dirname(pickle_path) or '.'}`: {available}"
+        )
 
     with open(pickle_path, "rb") as f:
-        enc = pickle.load(f)
+        encoder = pickle.load(f)
 
-    # Build index -> label mapping (as used by Transformers `id2label`)
-    idx2label = {int(i): str(label) for i, label in enumerate(enc.classes_)}
-    return idx2label
+    if not hasattr(encoder, "classes_"):
+        raise ValueError("Loaded object does not have `classes_` attribute.")
+
+    idx2label = {int(i): str(lbl) for i, lbl in enumerate(encoder.classes_)}
+    label2idx = {v: k for k, v in idx2label.items()}
+    return idx2label, label2idx
 
 
 # ============================================================
@@ -54,38 +61,26 @@ def load_label_mapping(pickle_path):
 @st.cache_resource
 def load_model_and_tokenizer():
     """
-    Load Transformer model and tokenizer from the local `model_v2` directory.
-    The function:
-    - Loads configuration and injects id2label/label2id from label_encoder.
-    - Loads tokenizer (BERT-style) from local JSON / vocab files.
-    - Loads sequence classification model with the updated configuration.
+    Load the Transformer model, tokenizer and label mappings
+    from the local `models_v2` directory.
     """
-    # Load label mapping from label_encoder.pkl
-    idx2label = load_label_mapping(LABEL_ENCODER_PATH)
-    label2idx = {v: k for k, v in idx2label.items()}
+    idx2label, label2idx = load_label_mapping(LABEL_ENCODER_PATH)
 
-    # Load base configuration
     config = AutoConfig.from_pretrained(CONFIG_PATH)
-
-    # Inject label dictionaries for nicer output
     config.id2label = idx2label
     config.label2id = label2idx
+    config.num_labels = len(idx2label)
 
-    # Load tokenizer files (tokenizer.json, vocab.txt, etc.)
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_PATH)
 
-    # Load model weights using the updated configuration
     model = AutoModelForSequenceClassification.from_pretrained(
         MODEL_PATH,
         config=config,
     )
 
-    # Put model in evaluation mode
-    model.eval()
-
-    # Select device (CPU / GPU)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
+    model.eval()
 
     return model, tokenizer, config, device
 
@@ -95,12 +90,11 @@ def load_model_and_tokenizer():
 # ============================================================
 def predict_emotion(text, model, tokenizer, config, device):
     """
-    Run a single forward pass on the input Arabic text and return:
+    Run an emotion classification pass on Arabic text and return:
     - predicted label (string)
-    - confidence score (float)
-    - dictionary of label -> probability for all classes
+    - confidence score (float in [0, 1])
+    - dictionary mapping label -> probability for all classes.
     """
-    # Tokenize input sentence
     encoded = tokenizer(
         text,
         padding=True,
@@ -109,23 +103,18 @@ def predict_emotion(text, model, tokenizer, config, device):
         return_tensors="pt",
     )
 
-    # Move tensors to the selected device
     encoded = {k: v.to(device) for k, v in encoded.items()}
 
-    # Disable gradient calculation for inference
     with torch.no_grad():
         outputs = model(**encoded)
         logits = outputs.logits
 
-    # Convert logits to probabilities via softmax
     probs = torch.softmax(logits, dim=-1)[0].cpu().numpy()
 
-    # Get index of the most probable class
     pred_idx = int(probs.argmax())
     pred_label = config.id2label.get(pred_idx, str(pred_idx))
     confidence = float(probs[pred_idx])
 
-    # Build probability dictionary: label -> prob
     prob_dict = {config.id2label[i]: float(p) for i, p in enumerate(probs)}
 
     return pred_label, confidence, prob_dict
@@ -136,15 +125,15 @@ def predict_emotion(text, model, tokenizer, config, device):
 # ============================================================
 with st.sidebar:
     st.title("💬 Emotional Arabic Chatbot")
-    st.markdown("**Module 1 – Transformer Emotion Model (model_v2)**")
+    st.markdown("**Module 1 – Transformer Emotion Model (models_v2)**")
     st.markdown("---")
     st.markdown(
         "This demo loads the fine‑tuned Arabic Transformer model from "
-        "`model_v2` and performs emotion detection on Arabic text."
+        "`models_v2` and performs emotion detection on Arabic text."
     )
     st.markdown(
-        "- Local, on‑device inference (no data is sent outside your machine).\n"
-        "- Intended for research and educational purposes only."
+        "- All inference runs locally on your machine.\n"
+        "- The app is intended for research and educational purposes only."
     )
     st.markdown("---")
     st.caption("Tip: Try different dialects and emotional tones to stress‑test the model.")
@@ -157,7 +146,7 @@ st.markdown(
     """
     <h1 style='text-align:right; direction:rtl;'>🌙 Emotional Arabic Chatbot – Transformer Version</h1>
     <p style='text-align:right; direction:rtl; color:gray;'>
-    تجربة نموذج التعرف على المشاعر من النص العربي باستخدام نسخة النموذج المحفوظة في <b>model_v2</b>.
+    تجربة نموذج التعرف على المشاعر من النص العربي باستخدام النسخة المحفوظة في <b>models_v2</b>.
     </p>
     """,
     unsafe_allow_html=True,
@@ -187,7 +176,7 @@ with col_btn:
     run_inference = st.button("🔍 Analyze Emotion")
 
 with col_meta:
-    st.metric("Model Source", "model_v2")
+    st.metric("Model Source", BASE_MODEL_DIR)
     st.metric("Task", "Emotion Classification")
 
 
@@ -199,19 +188,14 @@ if run_inference:
         st.warning("Please enter an Arabic sentence first.")
     else:
         try:
-            # Load model and tokenizer once (cached)
-            with st.spinner("Loading model_v2 and running inference..."):
+            with st.spinner("Loading models_v2 and running inference..."):
                 model, tokenizer, config, device = load_model_and_tokenizer()
                 pred_label, confidence, prob_dict = predict_emotion(
                     user_text, model, tokenizer, config, device
                 )
 
-            # =======================
-            # Results layout
-            # =======================
             col_main, col_chart = st.columns([1.2, 1])
 
-            # --- Main prediction card ---
             with col_main:
                 st.subheader("💖 Predicted Emotion")
                 st.markdown(
@@ -227,27 +211,25 @@ if run_inference:
 
                 st.markdown("**Model Notes**")
                 st.markdown(
-                    "- This result is produced by the Transformer model stored under `model_v2`.\n"
-                    "- Labels and mapping are loaded from `label_encoder.pkl`.\n"
+                    "- The prediction comes from the Transformer checkpoint stored under `models_v2`.\n"
+                    "- Human‑readable labels are loaded from `label_encoder.pkl`.\n"
                     "- Probabilities are computed using softmax over the model logits."
                 )
 
-            # --- Probability distribution chart ---
             with col_chart:
                 st.subheader("📊 Class Probabilities")
                 st.bar_chart(prob_dict)
 
-            # --- Debug / advanced info ---
             with st.expander("Advanced details (for debugging)"):
                 st.write("Config label mapping:", config.id2label)
                 st.write("Raw probability dictionary:", prob_dict)
 
         except Exception as e:
             st.error(
-                "An error occurred while loading `model_v2` or running inference. "
-                "Please verify that all required files (config.json, tokenizer.json, vocab.txt, "
-                "label_encoder.pkl, model weights) exist under the `model_v2` directory."
+                "An error occurred while loading `models_v2` or running inference.\n"
+                f"BASE_MODEL_DIR: `{BASE_MODEL_DIR}`.\n"
+                "Make sure you run `streamlit run app.py` from the `Module1_Text_to_Emotion` folder."
             )
             st.exception(e)
 else:
-    st.info("Enter some Arabic text above and click **Analyze Emotion** to test the `model_v2` checkpoint.")
+    st.info("Enter some Arabic text above and click **Analyze Emotion** to test the `models_v2` checkpoint.")
