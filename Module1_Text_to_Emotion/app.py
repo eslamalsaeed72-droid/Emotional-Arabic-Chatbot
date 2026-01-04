@@ -4,7 +4,11 @@ import torch
 import pickle
 import tempfile
 from pathlib import Path
-from transformers import AutoConfig, AutoTokenizer, AutoModelForSequenceClassification
+import numpy as np
+from transformers import (
+    AutoConfig, AutoTokenizer, PreTrainedModel,
+    SequenceClassificationMixin, BertModel, PreTrainedTokenizer
+)
 import subprocess
 
 # ============================================================
@@ -27,22 +31,18 @@ MODELS_DIR = REPO_PATH / "Module1_Text_to_Emotion" / "models_v2"
 def clone_and_get_models_dir():
     """
     Clone GitHub repo if not already cloned.
-    
     Returns path to models_v2 directory.
     """
-    # Check if models already present
     if MODELS_DIR.exists() and (MODELS_DIR / "pytorch_model.bin").exists():
         return str(MODELS_DIR)
 
     st.info("📥 Cloning repository from GitHub (first time only)...")
     
     try:
-        # Remove old repo if exists
         if REPO_PATH.exists():
             import shutil
             shutil.rmtree(REPO_PATH)
         
-        # Clone repo
         subprocess.run(
             ["git", "clone", "--depth", "1", REPO_URL, str(REPO_PATH)],
             check=True,
@@ -82,39 +82,54 @@ def load_label_mapping(pickle_path):
 
 
 # ============================================================
-# Load Transformer model
+# Fix config and load model
 # ============================================================
 @st.cache_resource
 def load_transformer_model():
     """
     Load Transformer model, tokenizer, config from models_v2.
     
-    Steps:
-    - Clone repo if needed
-    - Load label_encoder.pkl
-    - Load config.json
-    - Load tokenizer
-    - Load pytorch_model.bin
+    Handles missing model_type by inferring from available clues.
     """
-    model_dir = clone_and_get_models_dir()
-    model_path = Path(model_dir)
+    model_dir = Path(clone_and_get_models_dir())
 
     # Load label encoder
-    label_encoder_path = model_path / "label_encoder.pkl"
+    label_encoder_path = model_dir / "label_encoder.pkl"
     idx2label, label2idx = load_label_mapping(str(label_encoder_path))
+    num_labels = len(idx2label)
 
     # Load config
-    config = AutoConfig.from_pretrained(str(model_path))
+    config_path = model_dir / "config.json"
+    config = AutoConfig.from_pretrained(str(config_path), trust_remote_code=True)
+
+    # Fix missing model_type
+    if not hasattr(config, "model_type") or config.model_type is None:
+        # Try to infer from config attributes
+        if hasattr(config, "architectures"):
+            arch = config.architectures[0].lower()
+            if "bert" in arch:
+                config.model_type = "bert"
+            elif "roberta" in arch:
+                config.model_type = "roberta"
+            elif "arabert" in arch or "arab" in arch:
+                config.model_type = "bert"  # AraBERT is BERT-based
+        else:
+            # Default to BERT if unclear
+            config.model_type = "bert"
+    
+    # Set label mappings
     config.id2label = idx2label
     config.label2id = label2idx
+    config.num_labels = num_labels
 
     # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(str(model_path))
+    tokenizer = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
 
-    # Load model
-    model = AutoModelForSequenceClassification.from_pretrained(
-        str(model_path),
-        config=config,
+    # Load model with the fixed config
+    model = torch.load(
+        str(model_dir / "pytorch_model.bin"),
+        map_location="cpu",
+        weights_only=False,
     )
 
     # Move to device
@@ -131,11 +146,6 @@ def load_transformer_model():
 def predict_emotion(text, model, tokenizer, config, device):
     """
     Predict emotion from Arabic text using Transformer model.
-    
-    Returns:
-    - pred_label (str): predicted emotion
-    - confidence (float): confidence score [0, 1]
-    - prob_dict (dict): label -> probability mapping
     """
     # Tokenize
     encoded = tokenizer(
@@ -152,7 +162,16 @@ def predict_emotion(text, model, tokenizer, config, device):
     # Forward pass
     with torch.no_grad():
         outputs = model(**encoded)
-        logits = outputs.logits
+        
+        # Handle different output types
+        if isinstance(outputs, dict):
+            logits = outputs.get("logits", outputs.get("last_hidden_state"))
+        else:
+            logits = outputs[0] if hasattr(outputs, "__getitem__") else outputs
+
+    # Ensure logits are the right shape
+    if logits.dim() == 3:
+        logits = logits[:, 0, :]  # Take [CLS] token
 
     # Softmax
     probs = torch.softmax(logits, dim=-1)[0].cpu().numpy()
@@ -264,6 +283,7 @@ if run_btn:
                 st.bar_chart(prob_dict)
 
             with st.expander("🔧 Debug Information"):
+                st.write("**Config model_type:**", config.model_type)
                 st.write("**Config id2label:**", config.id2label)
                 st.write("**Raw probabilities:**", prob_dict)
 
