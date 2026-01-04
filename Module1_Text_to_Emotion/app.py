@@ -1,5 +1,5 @@
 # =============================================================================
-# FIX: Disable Streamlit file watcher (inotify limit)
+# STREAMLIT FIX
 # =============================================================================
 import os
 os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
@@ -13,19 +13,13 @@ import pickle
 import gdown
 import torch.nn.functional as F
 
-from transformers import (
-    BertTokenizer,
-    BertConfig,
-    BertForSequenceClassification
-)
-
-from safetensors.torch import load_file
+from transformers import BertTokenizer, BertConfig, BertForSequenceClassification
 
 # =============================================================================
 # PAGE CONFIG
 # =============================================================================
 st.set_page_config(
-    page_title="AI Arabic Emotion Analyzer",
+    page_title="Arabic Emotion Analyzer",
     page_icon="🤖",
     layout="centered"
 )
@@ -34,37 +28,57 @@ st.set_page_config(
 # PATHS
 # =============================================================================
 BASE_DIR = "Module1_Text_to_Emotion/models_v2"
-MODEL_PATH = os.path.join(BASE_DIR, "model.safetensors")
+MODEL_PATH = os.path.join(BASE_DIR, "pytorch_model.bin")
 LABEL_ENCODER_PATH = os.path.join(BASE_DIR, "label_encoder.pkl")
+
 DRIVE_FILE_ID = "12TtvlA3365gKRV0jCtKhCeN9oSk8fK1v"
 
+os.makedirs(BASE_DIR, exist_ok=True)
+
 # =============================================================================
-# LOAD MODEL (FINAL – GUARANTEED)
+# LOAD MODEL
 # =============================================================================
 @st.cache_resource
-def load_prediction_model():
+def load_model():
 
+    # -------- Download model if not exists --------
     if not os.path.exists(MODEL_PATH):
-        with st.spinner("Downloading model weights (≈500MB)..."):
-            os.makedirs(BASE_DIR, exist_ok=True)
-            gdown.download(id=DRIVE_FILE_ID, output=MODEL_PATH, quiet=False)
+        with st.spinner("📥 Downloading model weights..."):
+            gdown.download(
+                id=DRIVE_FILE_ID,
+                output=MODEL_PATH,
+                quiet=False
+            )
 
     try:
-        # ✅ tokenizer (slow but guaranteed)
-        tokenizer = BertTokenizer.from_pretrained(BASE_DIR)
+        # tokenizer (أي BERT عربي شغال)
+        tokenizer = BertTokenizer.from_pretrained(
+            "asafaya/bert-base-arabic"
+        )
+
+        # load label encoder
+        with open(LABEL_ENCODER_PATH, "rb") as f:
+            label_encoder = pickle.load(f)
+
+        num_labels = len(label_encoder.classes_)
 
         # config
-        config = BertConfig.from_pretrained(BASE_DIR)
+        config = BertConfig(
+            vocab_size=tokenizer.vocab_size,
+            hidden_size=768,
+            num_hidden_layers=12,
+            num_attention_heads=12,
+            intermediate_size=3072,
+            num_labels=num_labels
+        )
 
         # model
         model = BertForSequenceClassification(config)
-        state_dict = load_file(MODEL_PATH)
+
+        # 🔥 load weights
+        state_dict = torch.load(MODEL_PATH, map_location="cpu")
         model.load_state_dict(state_dict)
         model.eval()
-
-        # label encoder
-        with open(LABEL_ENCODER_PATH, "rb") as f:
-            label_encoder = pickle.load(f)
 
         return tokenizer, model, label_encoder
 
@@ -73,7 +87,7 @@ def load_prediction_model():
         return None, None, None
 
 
-tokenizer, model, label_encoder = load_prediction_model()
+tokenizer, model, label_encoder = load_model()
 
 # =============================================================================
 # PREDICTION
@@ -83,35 +97,32 @@ def predict_emotion(text):
     inputs = tokenizer(
         text,
         return_tensors="pt",
-        truncation=True,
         padding=True,
+        truncation=True,
         max_length=128
     )
 
     with torch.no_grad():
         outputs = model(**inputs)
-        probs = F.softmax(outputs.logits, dim=1)[0].cpu().numpy()
+        probs = F.softmax(outputs.logits, dim=1)[0]
 
-    idx = probs.argmax()
-    return (
-        label_encoder.inverse_transform([idx])[0],
-        probs[idx],
-        probs
-    )
+    idx = torch.argmax(probs).item()
+    return label_encoder.inverse_transform([idx])[0], probs[idx].item()
 
 # =============================================================================
 # UI
 # =============================================================================
 st.title("🤖 محلل المشاعر العربي الذكي")
 
-text_input = st.text_area(
+text = st.text_area(
     "أدخل النص:",
     placeholder="مثال: أنا سعيد جدًا اليوم"
 )
 
 if st.button("تحليل المشاعر 🔍"):
-    if not text_input.strip():
-        st.warning("من فضلك اكتب نصًا أولًا")
+    if not text.strip():
+        st.warning("من فضلك اكتب نص")
     else:
         with st.spinner("جاري التحليل..."):
-            emotion, conf, _ =_
+            emotion, conf = predict_emotion(text)
+            st.success(f"المشاعر المتوقعة: **{emotion}** ({conf:.1%})")
