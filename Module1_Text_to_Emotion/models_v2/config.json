@@ -1,0 +1,12 @@
+{
+  "model_name": "aubmindlab/bert-base-arabertv02",
+  "num_labels": 3,
+  "emotion_classes": [
+    "joy",
+    "neutral",
+    "sadness"
+  ],
+  "max_length": 128,
+  "hidden_dim": 256,
+  "dropout": 0.3
+}
