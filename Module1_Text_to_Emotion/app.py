@@ -1,5 +1,5 @@
 # =============================================================================
-# FIX 1: Disable Streamlit file watcher (inotify watch limit error)
+# FIX 1: Disable Streamlit file watcher (inotify watch limit)
 # =============================================================================
 import os
 os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
@@ -12,14 +12,17 @@ import torch
 import pickle
 import gdown
 import torch.nn.functional as F
+
 from transformers import (
     AutoTokenizer,
-    BertForSequenceClassification,
-    BertConfig
+    BertConfig,
+    BertForSequenceClassification
 )
 
+from safetensors.torch import load_file
+
 # =============================================================================
-# 1. PAGE CONFIGURATION & UI STYLING
+# 1. PAGE CONFIG
 # =============================================================================
 st.set_page_config(
     page_title="AI Arabic Emotion Analyzer",
@@ -55,7 +58,7 @@ html, body, [class*="css"] {
 """, unsafe_allow_html=True)
 
 # =============================================================================
-# 2. PATHS & CONFIG
+# 2. PATHS
 # =============================================================================
 BASE_DIR = "Module1_Text_to_Emotion/models_v2"
 MODEL_PATH = os.path.join(BASE_DIR, "model.safetensors")
@@ -64,7 +67,7 @@ LABEL_ENCODER_PATH = os.path.join(BASE_DIR, "label_encoder.pkl")
 DRIVE_FILE_ID = "12TtvlA3365gKRV0jCtKhCeN9oSk8fK1v"
 
 # =============================================================================
-# 3. LOAD MODEL (CRITICAL FIX APPLIED)
+# 3. LOAD MODEL (FINAL FIX)
 # =============================================================================
 @st.cache_resource
 def load_prediction_model():
@@ -80,21 +83,22 @@ def load_prediction_model():
             )
 
     try:
-        # Load tokenizer
+        # Tokenizer
         tokenizer = AutoTokenizer.from_pretrained(BASE_DIR)
 
-        # Load config explicitly as BERT
+        # Config (BERT)
         config = BertConfig.from_pretrained(BASE_DIR)
 
-        # Load model explicitly as BERT (NO AutoModel)
-        model = BertForSequenceClassification.from_pretrained(
-            BASE_DIR,
-            config=config
-        )
+        # Create empty model
+        model = BertForSequenceClassification(config)
+
+        # 🔥 Load safetensors manually
+        state_dict = load_file(MODEL_PATH)
+        model.load_state_dict(state_dict)
 
         model.eval()
 
-        # Load label encoder
+        # Label Encoder
         with open(LABEL_ENCODER_PATH, "rb") as f:
             label_encoder = pickle.load(f)
 
@@ -108,7 +112,7 @@ def load_prediction_model():
 tokenizer, model, label_encoder = load_prediction_model()
 
 # =============================================================================
-# 4. PREDICTION FUNCTION
+# 4. PREDICTION
 # =============================================================================
 def predict_emotion(text):
 
@@ -134,7 +138,7 @@ def predict_emotion(text):
 # 5. UI
 # =============================================================================
 st.title("🤖 محلل المشاعر العربي الذكي")
-st.markdown("اكتب جملة باللغة العربية وسيتم تحليل المشاعر باستخدام الذكاء الاصطناعي")
+st.markdown("اكتب نصًا باللغة العربية وسيتم تحليل المشاعر باستخدام الذكاء الاصطناعي")
 
 text_input = st.text_area(
     "أدخل النص:",
@@ -145,7 +149,7 @@ text_input = st.text_area(
 if st.button("تحليل المشاعر 🔍"):
 
     if not tokenizer or not model:
-        st.error("الموديل لم يتم تحميله بنجاح")
+        st.error("فشل تحميل الموديل")
     elif not text_input.strip():
         st.warning("من فضلك أدخل نصًا أولًا")
     else:
@@ -187,8 +191,6 @@ if st.button("تحليل المشاعر 🔍"):
 # =============================================================================
 st.markdown("---")
 st.markdown(
-    "<div style='text-align:center;color:#888;'>"
-    "تم التطوير باستخدام AraBERT و Streamlit"
-    "</div>",
+    "<div style='text-align:center;color:#888;'>تم التطوير باستخدام AraBERT و Streamlit</div>",
     unsafe_allow_html=True
 )
