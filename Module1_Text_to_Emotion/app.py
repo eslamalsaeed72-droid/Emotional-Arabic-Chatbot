@@ -1,17 +1,16 @@
 import streamlit as st
 import os
-import torch
 import pickle
 import gdown
 import tempfile
 from pathlib import Path
-from transformers import AutoConfig, AutoTokenizer, AutoModelForSequenceClassification
+import numpy as np
 
 # ============================================================
 # Streamlit page configuration
 # ============================================================
 st.set_page_config(
-    page_title="Emotional Arabic Chatbot - Transformer Model",
+    page_title="Emotional Arabic Chatbot - Model v2",
     page_icon="💬",
     layout="wide",
 )
@@ -19,211 +18,177 @@ st.set_page_config(
 # ============================================================
 # Google Drive model download configuration
 # ============================================================
-# The model_v2 file/folder on Google Drive (513 MB)
-# ID extracted from: https://drive.google.com/file/d/12TtvlA3365gKRV0jCtKhCeN9oSk8fK1v/view
 DRIVE_FILE_ID = "12TtvlA3365gKRV0jCtKhCeN9oSk8fK1v"
 
-# Simple persistent cache directory using the system temp folder
+# Cache directory for model files
 CACHE_DIR = Path(tempfile.gettempdir()) / "emotional_arabic_chatbot_models"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 MODEL_ZIP_PATH = CACHE_DIR / "models_v2.zip"
-MODEL_EXTRACT_PATH = CACHE_DIR / "models_v2"  # this must match the folder name inside the zip
+MODEL_EXTRACT_PATH = CACHE_DIR / "models_v2"
 
 
 # ============================================================
-# Helper: Download and extract model from Google Drive
+# Download and extract model from Google Drive
 # ============================================================
 def download_and_extract_model():
     """
-    Download the models_v2 ZIP file from Google Drive and extract it.
-
-    Workflow:
-    - If the extracted folder already exists and contains config.json,
-      reuse it (no download).
-    - Otherwise, download the ZIP file from Google Drive using gdown.
-    - Extract the ZIP into CACHE_DIR.
-    - Return the path to the extracted model directory.
+    Download models_v2 ZIP from Google Drive and extract.
+    
+    Returns the path to the extracted model directory.
     """
-    # Reuse existing extracted model if available
-    if MODEL_EXTRACT_PATH.exists() and (MODEL_EXTRACT_PATH / "config.json").exists():
+    # Reuse cached model if it exists
+    if MODEL_EXTRACT_PATH.exists() and (MODEL_EXTRACT_PATH / "label_encoder.pkl").exists():
         return str(MODEL_EXTRACT_PATH)
 
-    # Download ZIP file from Google Drive
-    st.info("📥 Downloading model_v2 from Google Drive (~513 MB)... This may take a few minutes on first run.")
+    st.info("📥 Downloading model_v2 from Google Drive (~513 MB)...")
     url = f"https://drive.google.com/uc?id={DRIVE_FILE_ID}"
 
-    gdown.download(
-        url,
-        output=str(MODEL_ZIP_PATH),
-        quiet=False,
-    )
+    gdown.download(url, output=str(MODEL_ZIP_PATH), quiet=False)
 
     if not MODEL_ZIP_PATH.exists():
-        raise FileNotFoundError(f"Failed to download model ZIP from Google Drive (expected at {MODEL_ZIP_PATH})")
+        raise FileNotFoundError("Failed to download from Google Drive.")
 
-    # Extract ZIP file
     st.info("📦 Extracting model files...")
     import zipfile
     with zipfile.ZipFile(MODEL_ZIP_PATH, "r") as zip_ref:
         zip_ref.extractall(CACHE_DIR)
 
-    # Verify extraction
-    if not (MODEL_EXTRACT_PATH / "config.json").exists():
-        raise FileNotFoundError(
-            "Extracted model folder does not contain config.json. "
-            f"Check the ZIP structure under: {CACHE_DIR}"
-        )
+    if not (MODEL_EXTRACT_PATH / "label_encoder.pkl").exists():
+        raise FileNotFoundError("Extracted model missing label_encoder.pkl.")
 
-    st.success("✅ Model downloaded and extracted successfully!")
+    st.success("✅ Model downloaded and extracted!")
     return str(MODEL_EXTRACT_PATH)
 
 
 # ============================================================
-# Helper: Load label encoder mapping
-# ============================================================
-def load_label_mapping(pickle_path: Path):
-    """
-    Load a scikit-learn style LabelEncoder from pickle and
-    build an index-to-label mapping for the Transformer config.
-    """
-    if not pickle_path.exists():
-        raise FileNotFoundError(
-            f"label_encoder.pkl not found at: {pickle_path}\n"
-            f"Parent directory contents: {list(pickle_path.parent.iterdir()) if pickle_path.parent.exists() else 'N/A'}"
-        )
-
-    with open(pickle_path, "rb") as f:
-        encoder = pickle.load(f)
-
-    if not hasattr(encoder, "classes_"):
-        raise ValueError("Loaded label encoder does not expose a `classes_` attribute.")
-
-    idx2label = {int(i): str(lbl) for i, lbl in enumerate(encoder.classes_)}
-    label2idx = {v: k for k, v in idx2label.items()}
-    return idx2label, label2idx
-
-
-# ============================================================
-# Cached loaders for config, tokenizer, and model
+# Load pickled models (sklearn-style)
 # ============================================================
 @st.cache_resource
-def load_model_and_tokenizer():
+def load_sklearn_models():
     """
-    Load the Transformer model, tokenizer and label mappings from Google Drive.
-
-    Steps:
-    - Download and extract models_v2 into CACHE_DIR (if not already present).
-    - Load label_encoder.pkl to obtain human-readable labels.
-    - Load config.json and inject id2label / label2id mappings.
-    - Load tokenizer and model weights from the extracted directory.
-    - Move model to the available device (CPU / GPU).
+    Load emotion detection model and vectorizer from pickle files.
+    
+    This function loads:
+    - emotion_model.pkl (trained classifier)
+    - emotion_tfidf.pkl (TF-IDF vectorizer)
+    - label_encoder.pkl (label encoder)
     """
-    # Download / extract model if needed
     model_dir = Path(download_and_extract_model())
 
-    # Paths inside extracted folder
-    label_encoder_path = model_dir / "label_encoder.pkl"
-    config_path = model_dir / "config.json"
-    tokenizer_path = str(model_dir)
-    model_path = str(model_dir)
+    # Try different possible file names (in case naming varies)
+    model_candidates = [
+        "emotion_model.pkl",
+        "emotion_model_v1.pkl",
+        "emotionmodel.pkl",
+    ]
+    tfidf_candidates = [
+        "emotion_tfidf.pkl",
+        "emotion_tfidf_v1.pkl",
+        "emotiontfidf.pkl",
+    ]
+    encoder_candidates = [
+        "label_encoder.pkl",
+        "emotion_encoder.pkl",
+        "emotion_encoder_v1.pkl",
+    ]
 
-    # Load label encoder and build mappings
-    idx2label, label2idx = load_label_mapping(label_encoder_path)
+    # Find actual file names in directory
+    model_file = None
+    tfidf_file = None
+    encoder_file = None
 
-    # Load configuration and inject label mappings
-    config = AutoConfig.from_pretrained(str(config_path))
-    config.id2label = idx2label
-    config.label2id = label2idx
-    config.num_labels = len(idx2label)
+    for candidate in model_candidates:
+        if (model_dir / candidate).exists():
+            model_file = model_dir / candidate
+            break
 
-    # Load tokenizer and model from extracted directory
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-    model = AutoModelForSequenceClassification.from_pretrained(
-        model_path,
-        config=config,
-    )
+    for candidate in tfidf_candidates:
+        if (model_dir / candidate).exists():
+            tfidf_file = model_dir / candidate
+            break
 
-    # Select device and move model
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    model.eval()
+    for candidate in encoder_candidates:
+        if (model_dir / candidate).exists():
+            encoder_file = model_dir / candidate
+            break
 
-    return model, tokenizer, config, device
+    if not model_file or not tfidf_file or not encoder_file:
+        available = list(model_dir.glob("*.pkl"))
+        raise FileNotFoundError(
+            f"Could not find model files.\n"
+            f"Looking for: model .pkl, tfidf .pkl, encoder .pkl\n"
+            f"Available: {available}"
+        )
+
+    # Load model, vectorizer, and encoder
+    with open(model_file, "rb") as f:
+        model = pickle.load(f)
+
+    with open(tfidf_file, "rb") as f:
+        vectorizer = pickle.load(f)
+
+    with open(encoder_file, "rb") as f:
+        encoder = pickle.load(f)
+
+    return model, vectorizer, encoder
 
 
 # ============================================================
 # Inference helper
 # ============================================================
-def predict_emotion(text: str, model, tokenizer, config, device):
+def predict_emotion_sklearn(text, model, vectorizer, encoder):
     """
-    Run an emotion classification pass on Arabic text.
-
+    Predict emotion using sklearn-style model.
+    
     Returns:
-    - pred_label (str): predicted emotion label.
-    - confidence (float): confidence score in [0, 1].
-    - prob_dict (dict): mapping label -> probability for all classes.
+    - label (str): predicted emotion
+    - confidence (float): confidence score
+    - prob_dict (dict): label -> probability for all classes
     """
-    # Tokenize input
-    encoded = tokenizer(
-        text,
-        padding=True,
-        truncation=True,
-        max_length=128,
-        return_tensors="pt",
-    )
+    # Vectorize input text
+    X = vectorizer.transform([text])
 
-    # Move tensors to device
-    encoded = {k: v.to(device) for k, v in encoded.items()}
+    # Predict
+    pred_idx = model.predict(X)[0]
+    pred_label = encoder.inverse_transform([pred_idx])[0]
 
-    # Forward pass (no gradients needed)
-    with torch.no_grad():
-        outputs = model(**encoded)
-        logits = outputs.logits
-
-    # Convert logits to probabilities
-    probs = torch.softmax(logits, dim=-1)[0].cpu().numpy()
-
-    # Choose the most probable label
-    pred_idx = int(probs.argmax())
-    pred_label = config.id2label.get(pred_idx, str(pred_idx))
-    confidence = float(probs[pred_idx])
-
-    # Build probability dictionary for all labels
-    prob_dict = {config.id2label[i]: float(p) for i, p in enumerate(probs)}
+    # Get confidence
+    if hasattr(model, "predict_proba"):
+        probs = model.predict_proba(X)[0]
+        confidence = float(np.max(probs))
+        prob_dict = {encoder.inverse_transform([i])[0]: float(p) for i, p in enumerate(probs)}
+    else:
+        confidence = 1.0
+        prob_dict = {pred_label: 1.0}
 
     return pred_label, confidence, prob_dict
 
 
 # ============================================================
-# Sidebar content
+# Sidebar
 # ============================================================
 with st.sidebar:
     st.title("💬 Emotional Arabic Chatbot")
-    st.markdown("**Module 1 – Transformer Emotion Model (models_v2)**")
+    st.markdown("**Module 1 – Emotion Model (models_v2)**")
     st.markdown("---")
     st.markdown(
-        "This demo downloads the fine‑tuned Arabic Transformer model from "
-        "Google Drive the first time it runs, then uses a cached copy."
+        "This app downloads the emotion detection model from Google Drive "
+        "and tests it on Arabic text."
     )
-    st.markdown(
-        "- First run: downloads ~513 MB (can take a few minutes).\n"
-        "- Later runs: reuse cached model (much faster).\n"
-        "- All inference executed locally on your machine.\n"
-        "- Intended for research and educational purposes only."
-    )
+    st.markdown("- First run: ~513 MB download\n- Later runs: cached\n- Local inference only")
     st.markdown("---")
-    st.caption("Tip: Try different dialects and emotional tones to test the model.")
+    st.caption("Tip: Try different Arabic sentences!")
 
 
 # ============================================================
-# Main header (RTL styling for Arabic text)
+# Main header
 # ============================================================
 st.markdown(
     """
-    <h1 style='text-align:right; direction:rtl;'>🌙 Emotional Arabic Chatbot – Transformer Version</h1>
+    <h1 style='text-align:right; direction:rtl;'>🌙 Emotional Arabic Chatbot</h1>
     <p style='text-align:right; direction:rtl; color:gray;'>
-    تجربة نموذج التعرف على المشاعر من النص العربي باستخدام <b>models_v2</b> المحمَّل من جوجل درايف.
+    نموذج التعرف على المشاعر من النص العربي (models_v2)
     </p>
     """,
     unsafe_allow_html=True,
@@ -232,85 +197,62 @@ st.markdown(
 st.markdown("---")
 
 # ============================================================
-# Text input section
+# Text input
 # ============================================================
 st.markdown(
-    "<div style='text-align:right; direction:rtl;'>اكتب جملة أو فقرة بالعربية لاختبار النموذج:</div>",
+    "<div style='text-align:right; direction:rtl;'>اكتب جملة بالعربية:</div>",
     unsafe_allow_html=True,
 )
 
-default_example = "أنا مبسوط جدًا النهارده لأن مشروع الشات بوت اشتغل أخيرًا! 😊"
-
 user_text = st.text_area(
     "",
-    value="",
-    height=150,
-    placeholder=default_example,
+    placeholder="مثال: أنا مبسوط جدًا لأن المشروع اشتغل!",
+    height=120,
 )
 
-col_btn, col_meta = st.columns([1, 3])
+col_btn, col_info = st.columns([1, 3])
 with col_btn:
-    run_inference = st.button("🔍 Analyze Emotion")
+    run_btn = st.button("🔍 Analyze")
 
-with col_meta:
-    st.metric("Model Source", "Google Drive cache")
-    st.metric("Task", "Emotion Classification")
+with col_info:
+    st.metric("Model", "sklearn-based")
+    st.metric("Source", "Google Drive")
 
 
 # ============================================================
 # Run prediction
 # ============================================================
-if run_inference:
+if run_btn:
     if not user_text.strip():
-        st.warning("⚠️ Please enter an Arabic sentence first.")
+        st.warning("Please enter Arabic text first.")
     else:
         try:
-            with st.spinner("⏳ Loading model and running inference..."):
-                model, tokenizer, config, device = load_model_and_tokenizer()
-                pred_label, confidence, prob_dict = predict_emotion(
-                    user_text, model, tokenizer, config, device
+            with st.spinner("Loading and predicting..."):
+                model, vectorizer, encoder = load_sklearn_models()
+                pred_label, confidence, prob_dict = predict_emotion_sklearn(
+                    user_text, model, vectorizer, encoder
                 )
 
-            col_main, col_chart = st.columns([1.2, 1])
+            col_res, col_chart = st.columns([1.2, 1])
 
-            with col_main:
-                st.subheader("💖 Predicted Emotion")
+            with col_res:
+                st.subheader("💖 Result")
                 st.markdown(
-                    f"""
-                    <div style='text-align:center; direction:rtl;'>
-                        <h2 style='color:#ff4b4b;'>{pred_label}</h2>
-                    </div>
-                    """,
+                    f"<h2 style='color:#ff4b4b; text-align:center;'>{pred_label}</h2>",
                     unsafe_allow_html=True,
                 )
                 st.progress(confidence)
                 st.caption(f"Confidence: {confidence * 100:.2f}%")
 
-                st.markdown("**ℹ️ Model Information**")
-                st.markdown(
-                    "- Checkpoint: Transformer model stored in `models_v2` (downloaded from Google Drive).\n"
-                    "- Labels: Loaded from `label_encoder.pkl`.\n"
-                    "- Probabilities: Softmax over logits.\n"
-                    "- Max sequence length: 128 tokens."
-                )
-
             with col_chart:
-                st.subheader("📊 Class Probabilities")
+                st.subheader("📊 Probabilities")
                 st.bar_chart(prob_dict)
 
-            with st.expander("🔧 Advanced details (for debugging)"):
-                st.write("Config id2label mapping:", config.id2label)
-                st.write("Raw probabilities:", prob_dict)
-                st.write("Device used:", device)
+            with st.expander("Debug info"):
+                st.write("Predicted probabilities:", prob_dict)
 
         except Exception as e:
-            st.error(
-                "❌ An error occurred while downloading/loading the model or running inference.\n\n"
-                "Please check the details below. Common issues:\n"
-                "- Google Drive link restricted or invalid.\n"
-                "- Not enough disk space in the temp directory.\n"
-                "- Internet connectivity problems during download."
-            )
+            st.error("Error loading model or running prediction.")
             st.exception(e)
 else:
-    st.info("👇 Enter some Arabic text above and click **Analyze Emotion** to test the model.")
+    st.info("Enter Arabic text and click **Analyze** to test.")
