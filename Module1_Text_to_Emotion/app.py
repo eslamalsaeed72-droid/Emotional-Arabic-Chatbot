@@ -1,5 +1,5 @@
 # =============================================================================
-# FIX: Disable Streamlit file watcher
+# FIX: Disable Streamlit file watcher (inotify limit)
 # =============================================================================
 import os
 os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
@@ -14,7 +14,7 @@ import gdown
 import torch.nn.functional as F
 
 from transformers import (
-    BertTokenizerFast,
+    BertTokenizer,
     BertConfig,
     BertForSequenceClassification
 )
@@ -39,7 +39,7 @@ LABEL_ENCODER_PATH = os.path.join(BASE_DIR, "label_encoder.pkl")
 DRIVE_FILE_ID = "12TtvlA3365gKRV0jCtKhCeN9oSk8fK1v"
 
 # =============================================================================
-# LOAD MODEL
+# LOAD MODEL (FINAL – GUARANTEED)
 # =============================================================================
 @st.cache_resource
 def load_prediction_model():
@@ -50,15 +50,19 @@ def load_prediction_model():
             gdown.download(id=DRIVE_FILE_ID, output=MODEL_PATH, quiet=False)
 
     try:
-        tokenizer = BertTokenizerFast.from_pretrained(BASE_DIR)
+        # ✅ tokenizer (slow but guaranteed)
+        tokenizer = BertTokenizer.from_pretrained(BASE_DIR)
 
+        # config
         config = BertConfig.from_pretrained(BASE_DIR)
 
+        # model
         model = BertForSequenceClassification(config)
         state_dict = load_file(MODEL_PATH)
         model.load_state_dict(state_dict)
         model.eval()
 
+        # label encoder
         with open(LABEL_ENCODER_PATH, "rb") as f:
             label_encoder = pickle.load(f)
 
@@ -100,11 +104,14 @@ def predict_emotion(text):
 # =============================================================================
 st.title("🤖 محلل المشاعر العربي الذكي")
 
-text_input = st.text_area("أدخل النص:")
+text_input = st.text_area(
+    "أدخل النص:",
+    placeholder="مثال: أنا سعيد جدًا اليوم"
+)
 
 if st.button("تحليل المشاعر 🔍"):
     if not text_input.strip():
-        st.warning("اكتب نص الأول")
+        st.warning("من فضلك اكتب نصًا أولًا")
     else:
-        emotion, conf, probs = predict_emotion(text_input)
-        st.success(f"المشاعر المتوقعة: {emotion} ({conf:.1%})")
+        with st.spinner("جاري التحليل..."):
+            emotion, conf, _ =_
