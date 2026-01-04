@@ -1,256 +1,209 @@
 import streamlit as st
+import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import pickle
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from pathlib import Path
-import warnings
-import re
-import nltk
-
-warnings.filterwarnings('ignore')
-
-# Download NLTK resources explicitly to ensure they exist in cloud environment
-try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    nltk.download('punkt')
-    nltk.download('stopwords')
-    nltk.download('wordnet')
+import os
+import gdown
+import torch.nn.functional as F
 
 # ============================================================================
-# PAGE CONFIGURATION
+# 1. PAGE CONFIGURATION & UI STYLING
 # ============================================================================
-
 st.set_page_config(
-    page_title="🧠 Emotional Chatbot - Module 1",
-    page_icon="🧠",
-    layout="wide",
-    initial_sidebar_state="expanded",
-    menu_items={
-        "About": "Emotional Chatbot Module 1 - Arabic NLP System\nVersion 1.0.0"
-    }
+    page_title="AI Arabic Emotion Analyzer",
+    page_icon="🤖",
+    layout="centered"
 )
 
-# Custom CSS
+# Custom CSS to support Arabic RTL (Right-to-Left) direction and enhance typography
 st.markdown("""
-    <style>
-    :root {
-        --primary-color: #6366f1;
-        --secondary-color: #8b5cf6;
+<style>
+    /* Import Cairo font for better Arabic readability */
+    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap');
+    
+    html, body, [class*="css"] {
+        font-family: 'Cairo', sans-serif;
+        direction: rtl;
+        text-align: right;
     }
-    .main { background-color: #f8fafc; }
-    .stMetric {
-        background-color: white;
-        padding: 15px;
+    .stTextArea textarea {
+        background-color: #f0f2f6;
         border-radius: 10px;
-        border-left: 4px solid #667eea;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        border: 1px solid #d1d1d1;
+        font-size: 18px;
     }
-    </style>
+    .stButton>button {
+        width: 100%;
+        background-color: #4CAF50;
+        color: white;
+        font-size: 20px;
+        border-radius: 10px;
+        height: 50px;
+        border: none;
+    }
+    .stButton>button:hover {
+        background-color: #45a049;
+        color: white;
+    }
+    .result-card {
+        padding: 20px;
+        border-radius: 15px;
+        margin-top: 20px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        text-align: center;
+    }
+</style>
 """, unsafe_allow_html=True)
 
 # ============================================================================
-# PREPROCESSING FUNCTION (MUST BE ADDED)
+# 2. CONFIGURATION & FILE PATH SETUP
 # ============================================================================
 
-def preprocess_arabic_text(text):
-    """
-    Preprocess Arabic text same as training phase
-    """
-    if not isinstance(text, str):
-        return ""
-    
-    # Lowercase
-    text = text.lower()
-    # Normalize whitespace
-    text = re.sub(r'\s+', ' ', text).strip()
-    # Remove URLs/Emails
-    text = re.sub(r'http\S+|www\S+|email', '', text)
-    # Remove mentions/hashtags
-    text = re.sub(r'@\w+|#', '', text)
-    # Keep only Arabic letters and spaces
-    text = re.sub(r'[^\u0600-\u06FF\s]', '', text)
-    # Remove diacritics
-    text = re.sub(r'[\u064B-\u065F]', '', text)
-    # Remove repeated chars
-    text = re.sub(r'(.)\1{2,}', r'\1', text)
-    
-    return text
+# Define local directory paths relative to the script location
+BASE_DIR = "Module1_Text_to_Emotion/models_v2"
+MODEL_FILENAME = "model.safetensors"  # Standard filename for Safetensors weights
+MODEL_PATH_FULL = os.path.join(BASE_DIR, MODEL_FILENAME)
+LABEL_ENCODER_PATH = os.path.join(BASE_DIR, "label_encoder.pkl")
+
+# Google Drive File ID for the heavy model weights (~500MB)
+# Extracted from the provided Drive link
+DRIVE_FILE_ID = '12TtvlA3365gKRV0jCtKhCeN9oSk8fK1v'
+DRIVE_URL = f'https://drive.google.com/uc?id={DRIVE_FILE_ID}'
 
 # ============================================================================
-# MODEL LOADING (CORRECTED PATHS & ENGLISH COMMENTS)
+# 3. MODEL LOADING LOGIC (CACHED)
 # ============================================================================
 
 @st.cache_resource
-def load_models():
-    """Load all trained models and vectorizers with correct file paths."""
+def load_prediction_model():
+    """
+    Downloads model weights from Google Drive if missing, then loads 
+    the Tokenizer, Model, and Label Encoder into memory.
+    """
+    # A) Verify existence of model weights; download from Cloud if missing
+    if not os.path.exists(MODEL_PATH_FULL):
+        with st.spinner('Downloading model weights from Cloud (approx. 500MB)... Please wait ⏳'):
+            try:
+                # Ensure the directory exists
+                os.makedirs(BASE_DIR, exist_ok=True)
+                # Download using gdown
+                gdown.download(id=DRIVE_FILE_ID, output=MODEL_PATH_FULL, quiet=False)
+                st.success("Model weights downloaded successfully!")
+            except Exception as e:
+                st.error(f"Failed to download files from Google Drive: {e}")
+                return None, None, None
+
+    # B) Load Model Architecture, Tokenizer, and Encoders
     try:
-        # Define the base path relative to the current file (app.py)
-        # This ensures the path works correctly on both local machine and Streamlit Cloud
-        base_path = Path(__file__).parent / "models"
+        # Load Tokenizer from local directory
+        tokenizer = AutoTokenizer.from_pretrained(BASE_DIR)
         
-        models = {
-            # Emotion Models
-            # Note: The folder is named 'emotion_models' (singular 'emotion')
-            'emotion_model': pickle.load(open(base_path / 'emotion_models/emotion_detection_model.pkl', 'rb')),
-            'emotion_vectorizer': pickle.load(open(base_path / 'emotion_models/emotion_tfidf_vectorizer.pkl', 'rb')),
-            'emotion_encoder': pickle.load(open(base_path / 'emotion_models/emotion_label_encoder.pkl', 'rb')),
+        # Load Model from local directory (now containing the downloaded weights)
+        model = AutoModelForSequenceClassification.from_pretrained(BASE_DIR)
+        
+        # Load Label Encoder to map indices back to emotion names
+        with open(LABEL_ENCODER_PATH, 'rb') as f:
+            label_encoder = pickle.load(f)
             
-            # Dialect Models
-            'dialect_model': pickle.load(open(base_path / 'dialect_models/dialect_model.pkl', 'rb')),
-            'dialect_vectorizer': pickle.load(open(base_path / 'dialect_models/dialect_vectorizer.pkl', 'rb')),
-            'dialect_encoder': pickle.load(open(base_path / 'dialect_models/dialect_encoder.pkl', 'rb'))
-        }
-        return models, True
+        return tokenizer, model, label_encoder
+
     except Exception as e:
-        # Log the error details to help with debugging if a file is missing
-        st.error(f"Error loading models. Please verify files exist in: {base_path}")
-        st.error(f"Detailed Error: {e}")
-        return None, False
+        st.error(f"Critical error loading model components: {e}")
+        return None, None, None
+
+# Initialize resources on app startup
+tokenizer, model, label_encoder = load_prediction_model()
+
 # ============================================================================
-# PREDICTION FUNCTIONS
+# 4. INFERENCE LOGIC
 # ============================================================================
 
-def predict_emotion(text, models):
-    try:
-        # CRITICAL: Clean text before prediction
-        cleaned_text = preprocess_arabic_text(text)
-        
-        features = models['emotion_vectorizer'].transform([cleaned_text])
-        pred = models['emotion_model'].predict(features)[0]
-        proba = models['emotion_model'].predict_proba(features)[0]
-        emotion_label = models['emotion_encoder'].inverse_transform([pred])[0]
-        confidence = proba.max()
-        
-        top_3_indices = np.argsort(proba)[-3:][::-1]
-        top_3_emotions = models['emotion_encoder'].inverse_transform(top_3_indices)
-        top_3_proba = proba[top_3_indices]
-        
-        return {
-            'emotion': emotion_label,
-            'confidence': confidence,
-            'top_3': list(zip(top_3_emotions, top_3_proba)),
-            'all_proba': dict(zip(models['emotion_encoder'].classes_, proba)),
-            'cleaned_text': cleaned_text
-        }
-    except Exception as e:
-        st.error(f"Error in emotion prediction: {str(e)}")
+def predict_emotion(text):
+    """
+    Performs preprocessing, tokenization, and inference on the input text.
+    Returns: Predicted Label, Confidence Score, and Probability Distribution.
+    """
+    if not text:
         return None
-
-def predict_dialect(text, models):
-    try:
-        # CRITICAL: Clean text before prediction
-        cleaned_text = preprocess_arabic_text(text)
-        
-        features = models['dialect_vectorizer'].transform([cleaned_text])
-        pred = models['dialect_model'].predict(features)[0]
-        decision = models['dialect_model'].decision_function(features)[0]
-        dialect_label = models['dialect_encoder'].inverse_transform([pred])[0]
-        
-        confidence = min(1.0, 0.5 + 0.5 * abs(decision.max()) / 10)
-        
-        return {
-            'dialect': dialect_label,
-            'confidence': confidence
-        }
-    except Exception as e:
-        st.error(f"Error in dialect prediction: {str(e)}")
-        return None
-
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
-
-def get_emotion_emoji(emotion):
-    emoji_map = {'joy': '😊', 'sadness': '😢', 'anger': '😠', 'fear': '😨', 
-                 'surprise': '😮', 'disgust': '🤢', 'neutral': '😐'}
-    return emoji_map.get(emotion.lower(), '🤷')
-
-def plot_emotion_distribution(proba_dict):
-    emotions = list(proba_dict.keys())
-    probabilities = list(proba_dict.values())
-    fig, ax = plt.subplots(figsize=(10, 5))
-    colors = sns.color_palette("husl", len(emotions))
-    bars = ax.barh(emotions, probabilities, color=colors)
-    ax.set_xlim(0, 1)
-    ax.set_title('Emotion Probability Distribution')
-    for i, (bar, prob) in enumerate(zip(bars, probabilities)):
-        ax.text(prob + 0.01, i, f'{prob:.1%}', va='center')
-    plt.tight_layout()
-    return fig
-
-# ============================================================================
-# MAIN APP LOGIC
-# ============================================================================
-
-models, loaded = load_models()
-
-# Sidebar
-st.sidebar.title("🧭 Navigation")
-page = st.sidebar.radio("Go to", ["🏠 Home", "🎯 Live Prediction", "📊 Model Performance"])
-
-if loaded:
-    st.sidebar.success("✅ Models Loaded Successfully")
-    st.sidebar.markdown("---")
-    st.sidebar.metric("Emotion Accuracy", "81%")
-    st.sidebar.metric("Dialect Accuracy", "86%")
-
-# --- HOME PAGE ---
-if page == "🏠 Home":
-    st.title("🧠 Emotional Chatbot - Module 1")
-    st.markdown("### Arabic Text Understanding Engine")
-    st.info("This module detects **Emotions** and **Dialects** from Arabic text using Machine Learning.")
-
-# --- LIVE PREDICTION PAGE ---
-elif page == "🎯 Live Prediction":
-    st.title("🎯 Live Prediction")
     
-    user_text = st.text_area("Enter Arabic Text:", height=100, placeholder="اكتب مشاعرك هنا...")
+    # 1. Preprocess and tokenize input text
+    # Max length set to 128 to optimize performance/memory
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=128)
     
-    if st.button("Analyze", type="primary"):
-        if user_text and loaded:
-            with st.spinner("Analyzing..."):
-                e_res = predict_emotion(user_text, models)
-                d_res = predict_dialect(user_text, models)
-                
-            if e_res and d_res:
-                st.markdown("---")
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    emoji = get_emotion_emoji(e_res['emotion'])
-                    st.markdown(f"""
-                    <div style='text-align: center; padding: 20px; background-color: #f0f2f6; border-radius: 10px;'>
-                        <h1>{emoji}</h1>
-                        <h3>{e_res['emotion'].title()}</h3>
-                        <p>Confidence: {e_res['confidence']:.1%}</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                with col2:
-                    st.markdown(f"""
-                    <div style='text-align: center; padding: 20px; background-color: #f0f2f6; border-radius: 10px;'>
-                        <h1>🗺️</h1>
-                        <h3>{d_res['dialect']}</h3>
-                        <p>Confidence: {d_res['confidence']:.1%}</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                st.markdown("### 📊 Detailed Analysis")
-                st.pyplot(plot_emotion_distribution(e_res['all_proba']))
-                
-                with st.expander("See Processed Text"):
-                    st.code(e_res['cleaned_text'])
+    # 2. Perform Inference
+    with torch.no_grad():
+        outputs = model(**inputs)
+        logits = outputs.logits
+        # Apply Softmax to convert logits to probabilities
+        probs = F.softmax(logits, dim=1).detach().numpy()[0]
+    
+    # 3. Decode Predictions
+    pred_idx = probs.argmax()
+    confidence = probs[pred_idx]
+    emotion_name = label_encoder.inverse_transform([pred_idx])[0]
+    
+    return emotion_name, confidence, probs
 
-# --- PERFORMANCE PAGE ---
-elif page == "📊 Model Performance":
-    st.title("📊 Model Performance")
-    col1, col2 = st.columns(2)
-    col1.metric("Training Samples", "13,000+")
-    col2.metric("Features (TF-IDF)", "5,000")
-    st.dataframe(pd.DataFrame({
-        'Model': ['Emotion (Random Forest)', 'Dialect (SVM)'],
-        'Accuracy': ['81%', '86%']
-    }), hide_index=True, use_container_width=True)
+# ============================================================================
+# 5. MAIN USER INTERFACE (UI)
+# ============================================================================
+
+st.title("🤖 محلل المشاعر العربي الذكي")
+st.markdown("قم بكتابة جملة باللغة العربية وسيقوم الذكاء الاصطناعي بتحليل المشاعر بدقة.")
+
+# Text Input Area
+text_input = st.text_area("أدخل النص هنا:", height=150, placeholder="مثال: أنا سعيد جداً اليوم لأنني أنجزت الكثير من العمل...")
+
+# Analyze Button
+if st.button("تحليل المشاعر 🔍"):
+    if not tokenizer or not model:
+        st.error("Model failed to load. Please check logs.")
+    elif not text_input.strip():
+        st.warning("الرجاء كتابة نص أولاً.")
+    else:
+        with st.spinner('جاري التحليل...'):
+            emotion, confidence, all_probs = predict_emotion(text_input)
+            
+            # Emotion-to-Emoji Mapping
+            emoji_map = {
+                'joy': '😊', 'happy': '😊', 'happiness': '😊',
+                'sadness': '😢', 'sad': '😢',
+                'anger': '😡', 'angry': '😡',
+                'fear': '😨',
+                'love': '❤️',
+                'surprise': '😲',
+                'neutral': '😐'
+            }
+            # Note: Ensure keys match the classes in your LabelEncoder
+            
+            # Dynamic Background Color based on Emotion Category
+            bg_color = "#e8f5e9" if emotion in ['joy', 'love', 'happy'] else "#ffebee" if emotion in ['anger', 'fear', 'sadness'] else "#f3f4f6"
+            current_emoji = emoji_map.get(emotion, '🤔')
+
+            # Display Primary Result Card
+            st.markdown(f"""
+            <div class="result-card" style="background-color: {bg_color};">
+                <h1 style="font-size: 60px; margin: 0;">{current_emoji}</h1>
+                <h2 style="color: #333; margin: 10px 0;">{emotion}</h2>
+                <h4 style="color: #555;">دقة التوقع: {confidence:.1%}</h4>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Display Detailed Probabilities
+            st.markdown("### 📊 تفاصيل التحليل:")
+            
+            # Sort and display classes by probability
+            class_names = label_encoder.classes_
+            sorted_indices = all_probs.argsort()[::-1] # Descending order
+            
+            for i in sorted_indices:
+                cls_name = class_names[i]
+                prob = all_probs[i]
+                # Filter out very low probabilities (< 1%) for cleaner UI
+                if prob > 0.01: 
+                    st.write(f"**{cls_name}**: {prob:.1%}")
+                    st.progress(float(prob))
+
+# Footer
+st.markdown("---")
+st.markdown("<div style='text-align: center; color: #888;'>تم التطوير باستخدام AraBERT و Streamlit</div>", unsafe_allow_html=True)
