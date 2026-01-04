@@ -1,8 +1,12 @@
+import os
+
+# ================= FIX: inotify watch limit =================
+os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
+
 import streamlit as st
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoConfig
 import pickle
-import os
 import gdown
 import torch.nn.functional as F
 
